@@ -7,6 +7,12 @@ SCHEMA = {
 "clients": "type:text full_name:text phone:text email:text messenger:text messenger_username:text source:text registration_address:text inn:text kpp:text ogrn:text bank_details:json comment:text manager_id:ref birth_date:text tags:json status:text contact_key:text",
 "persons": "client_id:ref last_name_ru:text first_name_ru:text patronymic_ru:text gender:text birth_date:text citizenship:text birth_place:text phone:text email:text relationship:text clothing_size:text wishes:text needs_visa:int identity_key:text processing_blocked:int deletion_due:text legal_hold:int",
 "identity_documents": "person_id:ref type:text series:text number:text issued_by:text division_code:text issue_date:text expiry_date:text last_name_latin:text first_name_latin:text issuing_country:text mrz_raw:text scan_file_id:ref verification_status:text confidence:json is_primary:int document_key:text manual_mrz_review:int",
+"upload_batches": "operation_key:text requested_by:ref item_count:int status:text finished_at:text",
+"upload_items": "batch_id:ref ordinal:int name:text file_id:ref content_hash:text mime:text status:text error_code:text ocr_run_id:ref duplicate_of:int",
+"ocr_runs": "file_id:ref person_id:ref provider:text provider_version:text provider_request_id:text integration_state:text confidence_origin:text raw_confidence:json calibrated_confidence:json status:text warnings:json dedupe_hints:json idempotency_key:text",
+"ocr_fields": "ocr_run_id:ref name:text value:text source:text raw_confidence:text confidence_origin:text calibrated_confidence:text critical:int confirmed:int confirmed_by:ref confirmed_at:text conflict:int possible_truncation:int",
+"ocr_confirmations": "ocr_run_id:ref field_name:text value_hash:text confirmed_by:ref confirmed_at:text conflict_ack:int truncation_ack:int",
+"integration_calls": "adapter:text operation:text idempotency_key:text attempt:int status:text duration_ms:int error_code:text",
 "addresses": "person_id:ref type:text postal_code:text region:text city:text street:text house:text building:text apartment:text full_address:text",
 "operators": "full_name:text short_name:text inn:text ogrn:text address:text registry_number:text guarantee_type:text guarantee_amount:int guarantor:text guarantee_number:text guarantee_from:text guarantee_to:text guarantee_address:text contacts:json portal_url:text default_commission_bps:int bank_details:json payment_hours:int agent_agreement:text",
 "countries": "code:text name:text passport_months:int passport_days:int passport_rule_basis:text visa_required:int visa_lead_days:int memo:text rules_checked_at:text",
@@ -43,16 +49,20 @@ PII = {
 "clients": {"full_name","phone","email","registration_address","birth_date","comment","bank_details","messenger_username"},
 "persons": {"last_name_ru","first_name_ru","patronymic_ru","birth_date","birth_place","phone","email","wishes"},
 "identity_documents": {"series","number","issued_by","division_code","issue_date","expiry_date","last_name_latin","first_name_latin","mrz_raw","confidence"},
+"upload_items": {"name"}, "ocr_fields": {"value"},
 "addresses": set(COLUMNS["addresses"])-{"person_id","type"},
 "contracts": {"signer_phone","signer_ip","evidence"},
-"notifications": {"payload","destination"},
-"otp_challenges": {"phone","payload"},
-"messages": {"body"},
-"amendments": {"old_data","new_data"},
+"notifications": {"payload","destination"}, "otp_challenges": {"phone","payload"},
+"messages": {"body"}, "amendments": {"old_data","new_data"},
 }
 FKS = {
 "clients": {"manager_id":"users"}, "persons":{"client_id":"clients"},
 "identity_documents":{"person_id":"persons","scan_file_id":"files"}, "addresses":{"person_id":"persons"},
+"upload_batches":{"requested_by":"users"},
+"upload_items":{"batch_id":"upload_batches","file_id":"files","ocr_run_id":"ocr_runs"},
+"ocr_runs":{"file_id":"files","person_id":"persons"},
+"ocr_fields":{"ocr_run_id":"ocr_runs","confirmed_by":"users"},
+"ocr_confirmations":{"ocr_run_id":"ocr_runs","confirmed_by":"users"},
 "deals":{"client_id":"clients","manager_id":"users","country_id":"countries","operator_id":"operators"},
 "deal_persons":{"deal_id":"deals","person_id":"persons","notarized_consent_file_id":"files","legal_representative_id":"persons","guardian_evidence_file_id":"files"},
 "contracts":{"deal_id":"deals","template_id":"templates","pdf_file_id":"files","signed_file_id":"files","document_id":"documents"},
@@ -63,4 +73,4 @@ FKS = {
 "sessions":{"user_id":"users","link_id":"portal_links"}, "otp_challenges":{"link_id":"portal_links","contract_id":"contracts","person_id":"persons"},
 "messages":{"deal_id":"deals"}, "amendments":{"deal_id":"deals"}, "hotels":{"country_id":"countries"}
 }
-UNIQUE = [("users","email"),("countries","code"),("deals","number"),("identity_documents","document_key"),("documents","idempotency_key"),("payments","idempotency_key"),("payments","external_id"),("tasks","idempotency_key"),("notifications","idempotency_key"),("portal_links","token_hash"),("sessions","token_hash"),("packages","idempotency_key"),("counters","name"),("settings","name"),("rate_limits","key")]
+UNIQUE = [("users","email"),("countries","code"),("deals","number"),("identity_documents","document_key"),("upload_batches","operation_key"),("ocr_runs","idempotency_key"),("documents","idempotency_key"),("payments","idempotency_key"),("payments","external_id"),("tasks","idempotency_key"),("notifications","idempotency_key"),("portal_links","token_hash"),("sessions","token_hash"),("packages","idempotency_key"),("counters","name"),("settings","name"),("rate_limits","key")]
