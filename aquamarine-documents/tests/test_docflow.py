@@ -4,9 +4,11 @@
 блокировка по незаполненным полям (V10), автосборка пакетов, задачи при некомплекте,
 жизненный цикл защищённой ссылки и целостность аудит-лога.
 
-Сам движок PDF/DOCX подменён заглушкой — его проверки в tests/test_documents.py.
+Настоящий движок PDF/DOCX подключается, если доступен, иначе подставляется
+заглушка — собственные проверки движка лежат в tests/test_documents.py.
 """
 
+import base64
 import hashlib
 import os
 import sys
@@ -45,15 +47,18 @@ def _merge_pdfs(items):
     return b"%PDF-1.4\n" + b"\n".join(items) + b"\n%%EOF"
 
 
-ENGINE = types.ModuleType("backend.documents")
-ENGINE.build_files = _build_files
-ENGINE.merge_pdfs = _merge_pdfs
-ENGINE.page_count = lambda data: max(1, data.count(b"%PDF") - 1)
-ENGINE.digest = lambda data: hashlib.sha256(data).hexdigest()
-sys.modules["backend.documents"] = ENGINE
-backend.documents = ENGINE
+try:  # в полном окружении логика проверяется на настоящем движке PDF/DOCX
+    from backend import documents as ENGINE  # noqa: E402
+except Exception:  # без reportlab и шрифтов ставим заглушку, чтобы тест оставался автономным
+    ENGINE = types.ModuleType("backend.documents")
+    ENGINE.build_files = _build_files
+    ENGINE.merge_pdfs = _merge_pdfs
+    ENGINE.page_count = lambda data: max(1, data.count(b"%PDF") - 1)
+    ENGINE.digest = lambda data: hashlib.sha256(data).hexdigest()
+    sys.modules["backend.documents"] = ENGINE
+    backend.documents = ENGINE
 
-from backend import docflow, render  # noqa: E402
+from backend import docflow, features, render  # noqa: E402
 from backend.db import Database  # noqa: E402
 from backend.service import Service  # noqa: E402
 
@@ -487,6 +492,60 @@ class DocflowTest(unittest.TestCase):
         versions = self.db.all("template_versions", "template_id=?", (row["id"],))
         self.assertGreaterEqual(len(versions), 2)
         self.assertEqual(docflow.sync_templates(self.db, self.user["id"])["updated"], [])
+
+    def test_api_documents_and_files(self):
+        """Маршруты раздела «Документы»: выпуск, список и скачивание PDF/DOCX."""
+        route = "/api/deals/" + self.deal_id + "/documents"
+        created = features.dispatch_features(self.service, "POST", route, {}, {"template": "application"})
+        document = created["document"]
+        self.assertEqual(document["type"], "application")
+        self.assertTrue(any(item["type"] == "application" for item in created["items"]))
+        self.assertTrue(features.dispatch_features(self.service, "GET", route, {}, {})["items"])
+        payload = features.dispatch_features(
+            self.service, "GET", "/api/documents/" + document["id"] + "/file", {"kind": ["docx"]}, {}
+        )["file"]
+        blob = base64.b64decode(payload["content_base64"])
+        self.assertTrue(blob.startswith(b"PK"))
+        self.assertEqual(payload["size"], len(blob))
+        with self.assertRaises(AppError):
+            features.dispatch_features(
+                self.service, "GET", "/api/documents/" + document["id"] + "/file", {"kind": ["txt"]}, {}
+            )
+        with self.assertRaises(AppError) as ctx:
+            features.dispatch_features(self.service, "DELETE", route, {}, {})
+        self.assertEqual(ctx.exception.status, 405)
+        self.assertIsNone(features.dispatch_features(self.service, "GET", "/api/clients", {}, {}))
+
+    def test_api_packages_preview_and_link(self):
+        """Через API: предпросмотр с подсказкой о полях, сборка пакета и защищённая ссылка."""
+        base = "/api/deals/" + self.deal_id
+        ready = features.dispatch_features(self.service, "GET", base + "/documents/preview", {"template": ["memo"]}, {})
+        self.assertTrue(ready["ready"])
+        self.assertNotIn("[[", ready["text"])
+        blocked = features.dispatch_features(
+            self.service, "GET", base + "/documents/preview", {"template": ["invoice"]}, {}
+        )
+        self.assertFalse(blocked["ready"])
+        self.assertTrue(blocked["missing"])
+        self.assertEqual(blocked["text"], "")
+        built = features.dispatch_features(self.service, "POST", base + "/packages", {}, {"name": "on_contract"})
+        package = built["package"]
+        self.assertEqual(package["status"], "готов")
+        self.assertTrue(built["items"])
+        bundle = features.dispatch_features(self.service, "GET", "/api/packages/" + package["id"] + "/file", {}, {})
+        self.assertTrue(base64.b64decode(bundle["file"]["content_base64"]).startswith(b"%PDF"))
+        issued = features.dispatch_features(
+            self.service, "POST", "/api/packages/" + package["id"] + "/link", {}, {"days": 14}
+        )
+        raw = issued["url"].rsplit("/", 1)[-1]
+        self.assertEqual(docflow.link_by_token(self.db, raw)["id"], issued["link"]["id"])
+        with self.assertRaises(AppError):
+            features.dispatch_features(
+                self.service, "POST", "/api/packages/" + package["id"] + "/link", {}, {"days": 400}
+            )
+        catalog = features.dispatch_features(self.service, "GET", "/api/templates/registry", {}, {})
+        self.assertGreaterEqual(len(catalog["templates"]), 14)
+        self.assertTrue(any(item["name"] == "on_contract" for item in catalog["packages"]))
 
 
 if __name__ == "__main__":
