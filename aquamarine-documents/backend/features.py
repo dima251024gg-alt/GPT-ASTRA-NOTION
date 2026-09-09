@@ -10,11 +10,13 @@
 import base64
 import re
 
-from . import docflow, render
+from . import docflow, render, rules, workflow
 from . import templates as registry
 from .security import AppError
 
 DEAL_DOCUMENTS = re.compile(r"/api/deals/([^/]+)/documents")
+DEAL_STATUS = re.compile(r"/api/deals/([^/]+)/status")
+DEAL_VALIDATIONS = re.compile(r"/api/deals/([^/]+)/validations")
 DEAL_PREVIEW = re.compile(r"/api/deals/([^/]+)/documents/preview")
 DEAL_PACKAGES = re.compile(r"/api/deals/([^/]+)/packages")
 DOCUMENT_FILE = re.compile(r"/api/documents/([^/]+)/file")
@@ -112,6 +114,57 @@ def dispatch_features(service, method, path, q, data):
         only(method, "POST")
         service.require("admin", "senior")
         return docflow.sync_templates(db, service.actor)
+    if path == "/api/jobs/daily":
+        only(method, "POST")
+        # Роли проверяет сам планировщик; повторный вызов за те же сутки вернёт skipped.
+        return workflow.daily_run(service, str(data.get("date") or "") or None, str(data.get("name") or "daily"))
+
+    match = DEAL_STATUS.fullmatch(path)
+    if match:
+        only(method, "GET", "POST")
+        deal_id = match[1]
+        deal = guard(service, deal_id)
+        if method == "GET":
+            return {
+                "status": deal["status"],
+                "next": workflow.statuses_after(deal["status"]),
+                "summary": rules.summary(rules.check_deal(db, deal_id)),
+            }
+        status = str(data.get("status") or "").strip()
+        if not status:
+            raise AppError("Не указан новый статус сделки")
+        return workflow.transition(
+            service,
+            deal_id,
+            status,
+            str(data.get("date") or "") or None,
+            flag(data, "force"),
+            str(data.get("reason") or ""),
+        )
+
+    match = DEAL_VALIDATIONS.fullmatch(path)
+    if match:
+        only(method, "GET")
+        deal_id = match[1]
+        deal = guard(service, deal_id)
+        on = param(q, "date") or None
+        issues = rules.check_deal(db, deal_id, on)
+        stops = {item["code"] for item in rules.blockers(issues)}
+        return {
+            "status": deal["status"],
+            "date": rules.today(on),
+            "issues": issues,
+            "summary": rules.summary(issues),
+            "next": workflow.statuses_after(deal["status"]),
+            "gates": [
+                {
+                    "status": name,
+                    "ready": not (set(codes) & stops),
+                    "blocking": sorted(set(codes) & stops),
+                }
+                for name, codes in rules.STATUS_GATES.items()
+            ],
+        }
 
     match = DEAL_PREVIEW.fullmatch(path)
     if match:
