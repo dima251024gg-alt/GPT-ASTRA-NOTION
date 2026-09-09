@@ -58,7 +58,7 @@ except Exception:  # без reportlab и шрифтов ставим заглу�
     sys.modules["backend.documents"] = ENGINE
     backend.documents = ENGINE
 
-from backend import docflow, features, render  # noqa: E402
+from backend import docflow, features, portal, render  # noqa: E402
 from backend.db import Database  # noqa: E402
 from backend.service import Service  # noqa: E402
 
@@ -546,6 +546,125 @@ class DocflowTest(unittest.TestCase):
         catalog = features.dispatch_features(self.service, "GET", "/api/templates/registry", {}, {})
         self.assertGreaterEqual(len(catalog["templates"]), 14)
         self.assertTrue(any(item["name"] == "on_contract" for item in catalog["packages"]))
+
+    def portal_session(self, package_id):
+        """Полный вход клиента: ссылка — код из СМС — сессия портала."""
+        link, url = docflow.issue_link(self.service, package_id)
+        raw = url.rsplit("/", 1)[-1]
+        head = {"user-agent": "tests"}
+        opened = portal.public_portal(self.db, "POST", "/api/portal/open", {"token": raw}, "127.0.0.1", head)
+        answer = portal.public_portal(
+            self.db,
+            "POST",
+            "/api/portal/confirm",
+            {"token": raw, "code": opened["demo_code"]},
+            "127.0.0.1",
+            head,
+        )
+        session = self.db.find("sessions", "link_id=?", (link["id"],))
+        return link, session, opened, answer
+
+    def test_portal_access_needs_sms_code(self):
+        """Одной ссылки недостаточно: без кода из СМС доступа к документам нет."""
+        package = docflow.build_package(self.service, self.deal_id, "on_contract")
+        _link, url = docflow.issue_link(self.service, package["id"])
+        raw = url.rsplit("/", 1)[-1]
+        head = {"user-agent": "tests"}
+        self.assertIsNone(portal.public_portal(self.db, "POST", "/api/clients", {}, "127.0.0.1", head))
+        opened = portal.public_portal(self.db, "POST", "/api/portal/open", {"token": raw}, "127.0.0.1", head)
+        self.assertEqual(opened["deal"], "АКВ-2026-00123")
+        self.assertIn("•", opened["phone"])
+        with self.assertRaises(AppError) as wrong:
+            portal.public_portal(
+                self.db, "POST", "/api/portal/confirm", {"token": raw, "code": "000000"}, "127.0.0.1", head
+            )
+        self.assertEqual(wrong.exception.status, 401)
+        self.assertEqual(wrong.exception.details["attempts_left"], portal.CODE_ATTEMPTS - 1)
+        answer = portal.public_portal(
+            self.db, "POST", "/api/portal/confirm", {"token": raw, "code": opened["demo_code"]}, "127.0.0.1", head
+        )
+        self.assertIn("aq_session=", answer.headers["Set-Cookie"])
+        self.assertIn("HttpOnly", answer.headers["Set-Cookie"])
+        self.assertTrue(answer.data["ok"])
+        session = self.db.find("sessions", "link_id=?", (_link["id"],))
+        self.assertIsNone(session.get("user_id"))
+        self.assertIsNotNone(self.db.one("packages", package["id"]).get("opened_at"))
+        with self.assertRaises(AppError) as used:
+            portal.public_portal(
+                self.db, "POST", "/api/portal/confirm", {"token": raw, "code": opened["demo_code"]}, "127.0.0.1", head
+            )
+        self.assertEqual(used.exception.status, 409)
+
+    def test_portal_documents_scoped_to_package(self):
+        """Клиент видит свои документы, номера паспортов — только под маской."""
+        package = docflow.build_package(self.service, self.deal_id, "on_contract")
+        _link, session, _opened, _answer = self.portal_session(package["id"])
+        view = portal.portal_dispatch(self.db, session, "GET", "/api/portal/deal", {}, "127.0.0.1", {})
+        self.assertEqual(view["number"], "АКВ-2026-00123")
+        self.assertAlmostEqual(view["due"], view["price"] - view["paid"], places=2)
+        numbers = [doc["number"] for tourist in view["tourists"] for doc in tourist["documents"]]
+        self.assertTrue(numbers)
+        self.assertTrue(all("•" in number for number in numbers))
+        docs = portal.portal_dispatch(self.db, session, "GET", "/api/portal/documents", {}, "127.0.0.1", {})
+        self.assertEqual(len(docs["items"]), len(package["document_ids"] or []))
+        self.assertEqual(docs["package"]["status"], "готов")
+        first = docs["items"][0]["id"]
+        got = portal.portal_dispatch(
+            self.db, session, "GET", "/api/portal/documents/" + first + "/file", {}, "127.0.0.1", {}
+        )
+        self.assertTrue(base64.b64decode(got["file"]["content_base64"]).startswith(b"%PDF"))
+        merged = portal.portal_dispatch(self.db, session, "GET", "/api/portal/package/file", {}, "127.0.0.1", {})
+        self.assertEqual(merged["file"]["mime"], docflow.PDF_MIME)
+        with self.assertRaises(AppError) as foreign:
+            portal.portal_dispatch(
+                self.db, session, "GET", "/api/portal/documents/00000000/file", {}, "127.0.0.1", {}
+            )
+        self.assertEqual(foreign.exception.status, 404)
+        with self.assertRaises(AppError) as unknown:
+            portal.portal_dispatch(self.db, session, "GET", "/api/portal/secrets", {}, "127.0.0.1", {})
+        self.assertEqual(unknown.exception.status, 404)
+
+    def test_portal_pep_signature_binds_file_hash(self):
+        """ПЭП привязана к хешу именно того PDF, который видел клиент."""
+        package = docflow.build_package(self.service, self.deal_id, "on_contract")
+        _link, session, _opened, _answer = self.portal_session(package["id"])
+        head = {"user-agent": "tests"}
+        request = portal.portal_dispatch(self.db, session, "POST", "/api/portal/sign/request", {}, "127.0.0.1", head)
+        contract = portal.signable_contract(self.db, self.deal_id)
+        self.assertEqual(request["file_hash"], contract["file_hash"])
+        self.assertIn("•", request["phone"])
+        with self.assertRaises(AppError) as wrong:
+            portal.portal_dispatch(
+                self.db, session, "POST", "/api/portal/sign/confirm", {"code": "000000"}, "127.0.0.1", head
+            )
+        self.assertEqual(wrong.exception.status, 401)
+        signed = portal.portal_dispatch(
+            self.db, session, "POST", "/api/portal/sign/confirm", {"code": request["demo_code"]}, "203.0.113.7", head
+        )
+        self.assertEqual(signed["status"], "подписан")
+        saved = self.db.one("contracts", contract["id"])
+        self.assertEqual(saved["signature_method"], "ПЭП: код из СМС")
+        self.assertEqual(saved["signer_ip"], "203.0.113.7")
+        self.assertEqual(saved["signed_file_hash"], contract["file_hash"])
+        self.assertTrue(saved["sms_code_hash"])
+        self.assertNotIn(request["demo_code"], str(saved["sms_code_hash"]))
+        self.assertEqual(saved["evidence"]["file_hash"], contract["file_hash"])
+        self.assertIn("•", saved["evidence"]["phone"])
+        with self.assertRaises(AppError) as again:
+            portal.portal_dispatch(self.db, session, "POST", "/api/portal/sign/request", {}, "127.0.0.1", head)
+        self.assertEqual(again.exception.status, 409)
+
+    def test_portal_reissued_link_closes_session(self):
+        """Новая ссылка отзывает прежнюю и закрывает старую сессию портала."""
+        package = docflow.build_package(self.service, self.deal_id, "on_contract")
+        _link, session, _opened, _answer = self.portal_session(package["id"])
+        portal.portal_dispatch(self.db, session, "GET", "/api/portal/deal", {}, "127.0.0.1", {})
+        docflow.issue_link(self.service, package["id"])
+        with self.assertRaises(AppError) as revoked:
+            portal.portal_dispatch(self.db, session, "GET", "/api/portal/deal", {}, "127.0.0.1", {})
+        self.assertEqual(revoked.exception.status, 410)
+        self.assertTrue(self.db.one("sessions", session["id"]).get("revoked_at"))
+        self.assertTrue(self.db.verify_audit())
 
 
 if __name__ == "__main__":
