@@ -47,16 +47,16 @@ class Database:
       name=f'fk_{table}_{field}';exists=self.execute('SELECT 1 FROM pg_constraint WHERE conname=?',(name,)).fetchone()
       if not exists:self.execute(f'ALTER TABLE "{table}" ADD CONSTRAINT "{name}" FOREIGN KEY ("{field}") REFERENCES "{target}"(id)')
    for table,col in UNIQUE:self.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS "uq_{table}_{col}" ON "{table}" ("{col}")')
-   self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_person ON deal_persons(deal_id,person_id) WHERE deleted_at IS NULL');self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_template_version ON template_versions(template_id,version)');self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run ON job_runs(name,run_date)')
-   for table,field in [('deals','manager_id'),('clients','manager_id'),('persons','identity_key'),('persons','client_id'),('identity_documents','person_id'),('consents','person_id'),('documents','deal_id'),('tasks','due_at'),('notifications','status')]:self.execute(f'CREATE INDEX IF NOT EXISTS "ix_{table}_{field}" ON "{table}" ("{field}")')
-   evidence_tables=('audit_log','ocr_runs','ocr_confirmations','integration_calls','file_scan_events')
+   self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_deal_person ON deal_persons(deal_id,person_id) WHERE deleted_at IS NULL');self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_client_person_relation ON client_person_relations(client_id,person_id,relation_type) WHERE deleted_at IS NULL');self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_template_version ON template_versions(template_id,version)');self.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run ON job_runs(name,run_date)')
+   for table,field in [('deals','manager_id'),('clients','manager_id'),('persons','identity_key'),('persons','client_id'),('client_person_relations','client_id'),('client_person_relations','person_id'),('access_grants','subject_id'),('access_grants','resource_id'),('identity_documents','person_id'),('consents','person_id'),('documents','deal_id'),('tasks','due_at'),('notifications','status')]:self.execute(f'CREATE INDEX IF NOT EXISTS "ix_{table}_{field}" ON "{table}" ("{field}")')
+   evidence_tables=('audit_log','ocr_runs','ocr_confirmations','integration_calls','file_scan_events','access_grant_events')
    if self.pg:
     self.execute("CREATE OR REPLACE FUNCTION deny_evidence_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Evidence is immutable'; END $$")
     for table in evidence_tables:
      trigger='immutable_'+table;self.execute(f'DROP TRIGGER IF EXISTS "{trigger}" ON "{table}"');self.execute(f'CREATE TRIGGER "{trigger}" BEFORE UPDATE OR DELETE OR TRUNCATE ON "{table}" FOR EACH STATEMENT EXECUTE FUNCTION deny_evidence_mutation()')
    else:
     for table in evidence_tables:
-     for action in ('UPDATE','DELETE'):
+     for action in('UPDATE','DELETE'):
       trigger=f'{table}_no_{action.lower()}';self.execute(f'CREATE TRIGGER IF NOT EXISTS "{trigger}" BEFORE {action} ON "{table}" BEGIN SELECT RAISE(ABORT,\'Evidence is immutable\'); END')
  def decode(self,table,row):
   if row is None:return None
