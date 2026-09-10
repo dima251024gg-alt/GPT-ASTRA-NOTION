@@ -20,6 +20,9 @@ def preview(service,deal_id,code,person_id,extra):
  guard(service,deal_id);template=docflow.template_row(service.db,code);context=docflow.build_context(service.db,deal_id,extra,person_id or None);missing=list(render.missing_fields(template,context));return {'template':code,'name':template['name'],'ready':not missing,'missing':missing,'text':'' if missing else render.render_template(template,context)}
 def dispatch_features(service,method,path,q,data):
  db=service.db
+ from .person_merge import dispatch_person_merges
+ merge_result=dispatch_person_merges(service,method,path,data)
+ if merge_result is not None:return merge_result
  if path=='/api/ocr/batches':
   only(method,'POST');from .ocr_pipeline import process_batch
   return process_batch(service,data.get('items'),data.get('operation_key'))
