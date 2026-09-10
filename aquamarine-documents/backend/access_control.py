@@ -68,5 +68,16 @@ def link_client_person(db,actor,client_id,person_id,relation_type='traveler',is_
  if actor['role']=='manager' and client.get('manager_id')!=actor['id']:raise AppError('Нельзя связывать карточки другого менеджера',403)
  if relation_type not in {'customer','traveler','representative','family','payer'}:raise AppError('Неизвестный тип связи')
  existing=db.find('client_person_relations','client_id=? AND person_id=? AND relation_type=?',(client_id,person_id,relation_type))
- if existing:return existing
- row=db.insert('client_person_relations',{'client_id':client_id,'person_id':person_id,'relation_type':relation_type,'is_primary':int(bool(is_primary)),'status':'active','valid_from':now(),'valid_to':valid_to},actor['id']);db.audit(actor['id'],'client_person_linked','client_person_relations',row['id'],{'relation_type':relation_type,'is_primary':bool(is_primary)});return row
+ if is_primary:
+  primary=db.find('client_person_relations','client_id=? AND is_primary=? AND status=?',(client_id,1,'active'))
+  if primary and primary['person_id']!=person_id:raise AppError('Основное лицо уже задано. Сначала подтвердите его замену отдельным действием',409)
+ verified=now()
+ if existing:
+  if is_primary and not existing.get('is_primary'):
+   existing=db.update('client_person_relations',existing['id'],{'is_primary':1,'status':'active','source':'manual','verified_by':actor['id'],'verified_at':verified})
+   db.update('clients',client_id,{'person_id':person_id})
+   db.audit(actor['id'],'client_person_primary_confirmed','client_person_relations',existing['id'],{'relation_type':relation_type})
+  return existing
+ row=db.insert('client_person_relations',{'client_id':client_id,'person_id':person_id,'relation_type':relation_type,'is_primary':int(bool(is_primary)),'status':'active','valid_from':verified,'valid_to':valid_to,'source':'manual','verified_by':actor['id'],'verified_at':verified},actor['id'])
+ if is_primary:db.update('clients',client_id,{'person_id':person_id})
+ db.audit(actor['id'],'client_person_linked','client_person_relations',row['id'],{'relation_type':relation_type,'is_primary':bool(is_primary)});return row

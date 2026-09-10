@@ -29,5 +29,9 @@ class AccessControlTest(unittest.TestCase):
   other=self.db.insert('clients',{'type':'individual','full_name':'Другой Синтетический','phone':'+70000000002','manager_id':self.manager['id'],'status':'active'});create_grant(self.db,self.director,'user',self.tech['id'],'clients',self.client['id'],['read'],self.expiry(),'Разбор конкретного обращения');self.assertFalse(grant_allows(self.db,'user',self.tech['id'],'clients',other['id'],'read'))
   with self.assertRaises(Exception):self.db.execute('DELETE FROM access_grant_events')
  def test_client_person_relation_is_explicit(self):
-  relation=link_client_person(self.db,self.manager,self.client['id'],self.person['id'],'traveler',True);self.assertEqual(relation['person_id'],self.person['id']);self.assertEqual(len(self.db.all('client_person_relations')),1);self.assertEqual(link_client_person(self.db,self.manager,self.client['id'],self.person['id'],'traveler')['id'],relation['id'])
+  relation=link_client_person(self.db,self.manager,self.client['id'],self.person['id'],'traveler',True);self.assertEqual(relation['person_id'],self.person['id']);self.assertEqual(relation['source'],'manual');self.assertEqual(relation['verified_by'],self.manager['id']);self.assertEqual(self.db.one('clients',self.client['id'])['person_id'],self.person['id']);self.assertEqual(len(self.db.all('client_person_relations')),1);self.assertEqual(link_client_person(self.db,self.manager,self.client['id'],self.person['id'],'traveler')['id'],relation['id'])
+ def test_primary_person_is_not_silently_replaced(self):
+  link_client_person(self.db,self.manager,self.client['id'],self.person['id'],'traveler',True);other=self.db.insert('persons',{'last_name_ru':'Другой','first_name_ru':'Тест','birth_date':'1992-02-02','processing_blocked':0,'legal_hold':0})
+  with self.assertRaises(AppError):link_client_person(self.db,self.manager,self.client['id'],other['id'],'traveler',True)
+  self.assertEqual(self.db.one('clients',self.client['id'])['person_id'],self.person['id'])
 if __name__=='__main__':unittest.main()
